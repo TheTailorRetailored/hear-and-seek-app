@@ -8,12 +8,15 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -50,6 +53,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.bridgesdigital.hearandseek.audio.FrequencySweep
 import com.bridgesdigital.hearandseek.audio.TonePlayer
+import com.bridgesdigital.hearandseek.game.GameMode
 import com.bridgesdigital.hearandseek.ui.theme.Aqua
 import com.bridgesdigital.hearandseek.ui.theme.DeepSurface
 import com.bridgesdigital.hearandseek.ui.theme.Lime
@@ -58,8 +62,6 @@ import com.bridgesdigital.hearandseek.ui.theme.Night
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
-private const val HIDE_SECONDS = 15
-private const val GAME_DURATION_MILLIS = 90_000L
 private const val START_FREQUENCY_HZ = 20_000.0
 private const val END_FREQUENCY_HZ = 800.0
 
@@ -67,35 +69,42 @@ private enum class GamePhase {
     READY,
     HIDING,
     HUNTING,
+    RESULT,
+}
+
+private enum class RoundResult {
     FOUND,
+    NOT_FOUND,
 }
 
 @Composable
 fun HearAndSeekApp() {
     val tonePlayer = remember { TonePlayer() }
-    val sweep = remember {
+
+    var selectedMode by remember { mutableStateOf(GameMode.CLASSIC) }
+    var phase by remember { mutableStateOf(GamePhase.READY) }
+    var roundResult by remember { mutableStateOf<RoundResult?>(null) }
+    var countdown by remember { mutableIntStateOf(selectedMode.hideSeconds) }
+    var elapsedMillis by remember { mutableLongStateOf(0L) }
+    var currentFrequency by remember { mutableDoubleStateOf(START_FREQUENCY_HZ) }
+
+    val sweep = remember(selectedMode) {
         FrequencySweep(
             startHz = START_FREQUENCY_HZ,
             endHz = END_FREQUENCY_HZ,
-            durationMillis = GAME_DURATION_MILLIS,
+            durationMillis = selectedMode.durationMillis,
         )
     }
-
-    var phase by remember { mutableStateOf(GamePhase.READY) }
-    var countdown by remember { mutableIntStateOf(HIDE_SECONDS) }
-    var startedAt by remember { mutableLongStateOf(0L) }
-    var elapsedMillis by remember { mutableLongStateOf(0L) }
-    var currentFrequency by remember { mutableDoubleStateOf(START_FREQUENCY_HZ) }
 
     DisposableEffect(Unit) {
         onDispose { tonePlayer.stop() }
     }
 
-    LaunchedEffect(phase) {
+    LaunchedEffect(phase, selectedMode) {
         when (phase) {
             GamePhase.HIDING -> {
-                countdown = HIDE_SECONDS
-                repeat(HIDE_SECONDS) {
+                countdown = selectedMode.hideSeconds
+                repeat(selectedMode.hideSeconds) {
                     delay(1_000L)
                     countdown -= 1
                 }
@@ -105,15 +114,16 @@ fun HearAndSeekApp() {
             GamePhase.HUNTING -> {
                 elapsedMillis = 0L
                 currentFrequency = START_FREQUENCY_HZ
-                startedAt = SystemClock.elapsedRealtime()
+                val startedAt = SystemClock.elapsedRealtime()
                 tonePlayer.start(sweep)
 
                 while (phase == GamePhase.HUNTING) {
                     elapsedMillis = SystemClock.elapsedRealtime() - startedAt
                     currentFrequency = sweep.frequencyAt(elapsedMillis)
-                    if (elapsedMillis >= GAME_DURATION_MILLIS) {
+                    if (elapsedMillis >= selectedMode.durationMillis) {
                         tonePlayer.stop()
-                        phase = GamePhase.FOUND
+                        roundResult = null
+                        phase = GamePhase.RESULT
                         break
                     }
                     delay(50L)
@@ -134,26 +144,44 @@ fun HearAndSeekApp() {
         ) { currentPhase ->
             when (currentPhase) {
                 GamePhase.READY -> ReadyScreen(
-                    onStart = { phase = GamePhase.HIDING },
+                    selectedMode = selectedMode,
+                    onSelectMode = { selectedMode = it },
+                    onStart = {
+                        roundResult = null
+                        phase = GamePhase.HIDING
+                    },
                 )
 
                 GamePhase.HIDING -> HidingScreen(
+                    mode = selectedMode,
                     secondsRemaining = countdown,
                     onCancel = { phase = GamePhase.READY },
                 )
 
                 GamePhase.HUNTING -> HuntingScreen(
+                    mode = selectedMode,
                     progress = sweep.progressAt(elapsedMillis).toFloat(),
+                    elapsedMillis = elapsedMillis,
                     frequencyHz = currentFrequency,
                     onFound = {
                         tonePlayer.stop()
-                        phase = GamePhase.FOUND
+                        roundResult = RoundResult.FOUND
+                        phase = GamePhase.RESULT
                     },
                 )
 
-                GamePhase.FOUND -> FoundScreen(
-                    onPlayAgain = { phase = GamePhase.HIDING },
-                    onHome = { phase = GamePhase.READY },
+                GamePhase.RESULT -> ResultScreen(
+                    result = roundResult,
+                    onFound = { roundResult = RoundResult.FOUND },
+                    onNotFound = { roundResult = RoundResult.NOT_FOUND },
+                    onPlayAgain = {
+                        roundResult = null
+                        phase = GamePhase.HIDING
+                    },
+                    onHome = {
+                        roundResult = null
+                        phase = GamePhase.READY
+                    },
                 )
             }
         }
@@ -161,51 +189,167 @@ fun HearAndSeekApp() {
 }
 
 @Composable
-private fun ReadyScreen(onStart: () -> Unit) {
+private fun ReadyScreen(
+    selectedMode: GameMode,
+    onSelectMode: (GameMode) -> Unit,
+    onStart: () -> Unit,
+) {
     ScreenColumn {
-        BrandMark()
-        Spacer(modifier = Modifier.height(32.dp))
+        BrandMark(modifier = Modifier.size(92.dp))
+        Spacer(modifier = Modifier.height(16.dp))
         Text(
             text = "HEAR & SEEK",
             color = MaterialTheme.colorScheme.onBackground,
-            fontSize = 38.sp,
+            fontSize = 34.sp,
             fontWeight = FontWeight.Black,
             letterSpacing = 1.5.sp,
             textAlign = TextAlign.Center,
         )
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(6.dp))
         Text(
-            text = "Hide the phone. Find it as the pitch falls.",
+            text = "Choose how slowly the pitch falls.",
             color = MutedText,
-            fontSize = 18.sp,
-            lineHeight = 25.sp,
+            fontSize = 16.sp,
             textAlign = TextAlign.Center,
         )
-        Spacer(modifier = Modifier.height(36.dp))
-        InfoCard()
+        Spacer(modifier = Modifier.height(22.dp))
+        ModePicker(
+            selectedMode = selectedMode,
+            onSelectMode = onSelectMode,
+        )
+        Spacer(modifier = Modifier.height(18.dp))
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            color = DeepSurface,
+        ) {
+            Column(modifier = Modifier.padding(18.dp)) {
+                Text(
+                    text = "${selectedMode.title}: ${selectedMode.durationLabel}",
+                    color = Lime,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "${selectedMode.hideSeconds}-second hiding countdown • 20 kHz → 800 Hz",
+                    color = MutedText,
+                    fontSize = 14.sp,
+                )
+            }
+        }
         Spacer(modifier = Modifier.weight(1f))
         PrimaryButton(
-            text = "START GAME",
+            text = "START ${selectedMode.title.uppercase()}",
             onClick = onStart,
         )
     }
 }
 
 @Composable
+private fun ModePicker(
+    selectedMode: GameMode,
+    onSelectMode: (GameMode) -> Unit,
+) {
+    val modes = GameMode.entries
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            ModeCard(
+                mode = modes[0],
+                selected = selectedMode == modes[0],
+                onClick = { onSelectMode(modes[0]) },
+                modifier = Modifier.weight(1f),
+            )
+            ModeCard(
+                mode = modes[1],
+                selected = selectedMode == modes[1],
+                onClick = { onSelectMode(modes[1]) },
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            ModeCard(
+                mode = modes[2],
+                selected = selectedMode == modes[2],
+                onClick = { onSelectMode(modes[2]) },
+                modifier = Modifier.weight(1f),
+            )
+            ModeCard(
+                mode = modes[3],
+                selected = selectedMode == modes[3],
+                onClick = { onSelectMode(modes[3]) },
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ModeCard(
+    mode: GameMode,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier
+            .height(82.dp)
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(18.dp),
+        color = if (selected) Lime.copy(alpha = 0.13f) else DeepSurface,
+        border = BorderStroke(
+            width = if (selected) 2.dp else 1.dp,
+            color = if (selected) Lime else DeepSurface,
+        ),
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Text(
+                text = mode.title,
+                color = if (selected) Lime else MaterialTheme.colorScheme.onSurface,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                text = mode.durationLabel,
+                color = MutedText,
+                fontSize = 14.sp,
+            )
+        }
+    }
+}
+
+@Composable
 private fun HidingScreen(
+    mode: GameMode,
     secondsRemaining: Int,
     onCancel: () -> Unit,
 ) {
     ScreenColumn {
         Spacer(modifier = Modifier.weight(1f))
         Text(
-            text = "HIDE THE PHONE",
+            text = "${mode.title.uppercase()} MODE",
             color = Aqua,
-            fontSize = 18.sp,
+            fontSize = 16.sp,
             fontWeight = FontWeight.Bold,
             letterSpacing = 2.sp,
         )
-        Spacer(modifier = Modifier.height(20.dp))
+        Spacer(modifier = Modifier.height(10.dp))
+        Text(
+            text = "HIDE THE PHONE",
+            color = MaterialTheme.colorScheme.onBackground,
+            fontSize = 24.sp,
+            fontWeight = FontWeight.Black,
+        )
+        Spacer(modifier = Modifier.height(18.dp))
         Text(
             text = secondsRemaining.coerceAtLeast(0).toString(),
             color = Lime,
@@ -227,10 +371,14 @@ private fun HidingScreen(
 
 @Composable
 private fun HuntingScreen(
+    mode: GameMode,
     progress: Float,
+    elapsedMillis: Long,
     frequencyHz: Double,
     onFound: () -> Unit,
 ) {
+    val remainingSeconds = ((mode.durationMillis - elapsedMillis).coerceAtLeast(0L) + 999L) / 1_000L
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -248,18 +396,23 @@ private fun HuntingScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text(
-                text = "THE HUNT IS ON",
+                text = "${mode.title.uppercase()} HUNT",
                 color = Aqua,
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 2.sp,
             )
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = "${formatTime(remainingSeconds)} remaining",
+                color = MaterialTheme.colorScheme.onBackground,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+            )
             Text(
                 text = formatFrequency(frequencyHz),
-                color = MaterialTheme.colorScheme.onBackground,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.SemiBold,
+                color = MutedText,
+                fontSize = 16.sp,
             )
             Spacer(modifier = Modifier.height(12.dp))
             LinearProgressIndicator(
@@ -282,37 +435,99 @@ private fun HuntingScreen(
 }
 
 @Composable
-private fun FoundScreen(
+private fun ResultScreen(
+    result: RoundResult?,
+    onFound: () -> Unit,
+    onNotFound: () -> Unit,
     onPlayAgain: () -> Unit,
     onHome: () -> Unit,
 ) {
     ScreenColumn {
         Spacer(modifier = Modifier.weight(1f))
         BrandMark()
-        Spacer(modifier = Modifier.height(28.dp))
-        Text(
-            text = "FOUND!",
-            color = Lime,
-            fontSize = 56.sp,
-            fontWeight = FontWeight.Black,
-        )
-        Spacer(modifier = Modifier.height(10.dp))
-        Text(
-            text = "Pass the phone to the next hider.",
-            color = MutedText,
-            fontSize = 18.sp,
-            textAlign = TextAlign.Center,
-        )
-        Spacer(modifier = Modifier.weight(1f))
-        PrimaryButton(
-            text = "PLAY AGAIN",
-            onClick = onPlayAgain,
-        )
-        Spacer(modifier = Modifier.height(12.dp))
-        SecondaryButton(
-            text = "BACK TO START",
-            onClick = onHome,
-        )
+        Spacer(modifier = Modifier.height(24.dp))
+
+        when (result) {
+            null -> {
+                Text(
+                    text = "TIME'S UP",
+                    color = Aqua,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 2.sp,
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = "Was the phone found?",
+                    color = MaterialTheme.colorScheme.onBackground,
+                    fontSize = 34.sp,
+                    fontWeight = FontWeight.Black,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                PrimaryButton(
+                    text = "YES, FOUND IT",
+                    onClick = onFound,
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                SecondaryButton(
+                    text = "NO, NOT FOUND",
+                    onClick = onNotFound,
+                )
+            }
+
+            RoundResult.FOUND -> {
+                Text(
+                    text = "FOUND!",
+                    color = Lime,
+                    fontSize = 56.sp,
+                    fontWeight = FontWeight.Black,
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = "Pass the phone to the next hider.",
+                    color = MutedText,
+                    fontSize = 18.sp,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                PrimaryButton(
+                    text = "PLAY AGAIN",
+                    onClick = onPlayAgain,
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                SecondaryButton(
+                    text = "BACK TO START",
+                    onClick = onHome,
+                )
+            }
+
+            RoundResult.NOT_FOUND -> {
+                Text(
+                    text = "NOT FOUND",
+                    color = Aqua,
+                    fontSize = 44.sp,
+                    fontWeight = FontWeight.Black,
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = "Try again—or choose a longer mode.",
+                    color = MutedText,
+                    fontSize = 18.sp,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                PrimaryButton(
+                    text = "TRY AGAIN",
+                    onClick = onPlayAgain,
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                SecondaryButton(
+                    text = "CHOOSE ANOTHER MODE",
+                    onClick = onHome,
+                )
+            }
+        }
     }
 }
 
@@ -326,41 +541,6 @@ private fun ScreenColumn(content: @Composable ColumnScope.() -> Unit) {
         verticalArrangement = Arrangement.Top,
         content = content,
     )
-}
-
-@Composable
-private fun InfoCard() {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(24.dp),
-        color = DeepSurface,
-    ) {
-        Column(
-            modifier = Modifier.padding(22.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            InfoLine("15 seconds", "to hide the phone")
-            InfoLine("90 seconds", "for the pitch to fall")
-            InfoLine("20 kHz → 800 Hz", "younger ears may start first")
-        }
-    }
-}
-
-@Composable
-private fun InfoLine(value: String, description: String) {
-    Column {
-        Text(
-            text = value,
-            color = Lime,
-            fontSize = 17.sp,
-            fontWeight = FontWeight.Bold,
-        )
-        Text(
-            text = description,
-            color = MutedText,
-            fontSize = 15.sp,
-        )
-    }
 }
 
 @Composable
@@ -498,4 +678,10 @@ private fun formatFrequency(frequencyHz: Double): String {
     } else {
         "${frequencyHz.roundToInt()} Hz"
     }
+}
+
+private fun formatTime(totalSeconds: Long): String {
+    val minutes = totalSeconds / 60L
+    val seconds = totalSeconds % 60L
+    return "$minutes:${seconds.toString().padStart(2, '0')}"
 }
