@@ -1,6 +1,14 @@
+<p align="center">
+  <img src="docs/images/social-preview.png" alt="Hear & Seek — hide the phone and follow the sound" width="100%">
+</p>
+
 # Hear & Seek
 
 Hear & Seek is an Android hide-and-seek game. One player hides the phone while it is silent. The phone then plays a continuous tone that falls from 20 kHz to 800 Hz, so players with younger ears may get a head start and everyone else gradually joins the hunt.
+
+<p align="center">
+  <img src="docs/images/home-screen.png" alt="Hear & Seek home screen with Quick, Classic, Long and Marathon modes" width="320">
+</p>
 
 ## Game modes
 
